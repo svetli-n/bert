@@ -733,10 +733,9 @@ def main(_):
             writer.write('predicted,actual,probability_1\n')
             tf.logging.info("***** Pred results *****")
             for prediction, actual in zip(predictions, actuals):
-                predicted = prediction['class_ids'][0]
-                tf.logging.info('item: {}, predicted: {}, actual: {}, probability:{}'.format(prediction, predicted, actual,
-                                                                                       prediction['logits'][predicted]))
-                writer.write('{},{},{}\n'.format(predicted, actual, prediction['probabilities'][0]))
+                # predicted = prediction['class_ids'][0]
+                # tf.logging.info('item: {}, predicted: {}, actual: {}'.format(prediction, predicted, actual))
+                writer.write('{},{}\n'.format(actual, prediction['probabilities'][0]))
 
     if FLAGS.do_eval:
         pred_examples = processor.get_dev_examples(FLAGS.data_dir)
