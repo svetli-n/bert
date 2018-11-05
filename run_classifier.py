@@ -730,12 +730,13 @@ def main(_):
 
         pred_file = os.path.join(FLAGS.output_dir, "pred_results.csv")
         with tf.gfile.GFile(pred_file, "w") as writer:
-            writer.write('predicted,actual\n')
+            writer.write('predicted,actual,probability\n')
             tf.logging.info("***** Pred results *****")
             for prediction, actual in zip(predictions, actuals):
                 predicted = prediction['class_ids'][0]
-                tf.logging.info('item: {}, predicted: {}, actual: {}'.format(prediction, predicted, actual))
-                writer.write('{},{}\n'.format(predicted, actual))
+                tf.logging.info('item: {}, predicted: {}, actual: {}, probability:{}'.format(prediction, predicted, actual,
+                                                                                       prediction['logits'][predicted]))
+                writer.write('{},{},{}\n'.format(predicted, actual, prediction['probabilities'][predicted]))
 
     if FLAGS.do_eval:
         pred_examples = processor.get_dev_examples(FLAGS.data_dir)
