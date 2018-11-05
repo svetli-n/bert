@@ -70,6 +70,8 @@ flags.DEFINE_bool("do_train", False, "Whether to run training.")
 
 flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
 
+flags.DEFINE_bool("do_pred", False, "Whether to run pred on the dev set.")
+
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
 flags.DEFINE_integer("eval_batch_size", 8, "Total batch size for eval.")
@@ -532,6 +534,17 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
                 loss=total_loss,
                 eval_metrics=eval_metrics,
                 scaffold_fn=scaffold_fn)
+
+        elif mode == tf.estimator.ModeKeys.PREDICT:
+            predicted_classes = tf.argmax(logits, 1)
+            if mode == tf.estimator.ModeKeys.PREDICT:
+                predictions = {
+                    'class_ids': predicted_classes[:, tf.newaxis],
+                    'probabilities': tf.nn.softmax(logits),
+                    'logits': logits,
+                }
+                output_spec = tf.estimator.EstimatorSpec(mode, predictions=predictions)
+
         else:
             raise ValueError("Only TRAIN and EVAL modes are supported: %s" % (mode))
 
@@ -602,7 +615,7 @@ def main(_):
         "mrpc": MrpcProcessor,
     }
 
-    if not FLAGS.do_train and not FLAGS.do_eval:
+    if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_pred:
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
     bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
@@ -669,7 +682,9 @@ def main(_):
         model_fn=model_fn,
         config=run_config,
         train_batch_size=FLAGS.train_batch_size,
-        eval_batch_size=FLAGS.eval_batch_size)
+        eval_batch_size=FLAGS.eval_batch_size,
+        predict_batch_size=FLAGS.eval_batch_size,
+    )
 
     if FLAGS.do_train:
         train_features = convert_examples_to_features(
@@ -685,13 +700,13 @@ def main(_):
             drop_remainder=True)
         estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
 
-    if FLAGS.do_eval:
-        eval_examples = processor.get_dev_examples(FLAGS.data_dir)
-        eval_features = convert_examples_to_features(
-            eval_examples, label_list, FLAGS.max_seq_length, tokenizer)
+    if FLAGS.do_pred:
+        pred_examples = processor.get_dev_examples(FLAGS.data_dir)
+        pred_features = convert_examples_to_features(
+            pred_examples, label_list, FLAGS.max_seq_length, tokenizer)
 
-        tf.logging.info("***** Running evaluation *****")
-        tf.logging.info("  Num examples = %d", len(eval_examples))
+        tf.logging.info("***** Running prediction *****")
+        tf.logging.info("  Num examples = %d", len(pred_examples))
         tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
 
         # This tells the estimator to run through the entire set.
@@ -701,7 +716,44 @@ def main(_):
         if FLAGS.use_tpu:
             # Eval will be slightly WRONG on the TPU because it will truncate
             # the last batch.
-            eval_steps = int(len(eval_examples) / FLAGS.eval_batch_size)
+            eval_steps = int(len(pred_examples) / FLAGS.eval_batch_size)
+
+        eval_drop_remainder = True if FLAGS.use_tpu else False
+        pred_input_fn = input_fn_builder(
+            features=pred_features,
+            seq_length=FLAGS.max_seq_length,
+            is_training=False,
+            drop_remainder=eval_drop_remainder)
+
+        predictions = estimator.predict(input_fn=pred_input_fn)
+        actuals = [a.label_id for a in pred_features]
+
+        pred_file = os.path.join(FLAGS.output_dir, "pred_results.csv")
+        with tf.gfile.GFile(pred_file, "w") as writer:
+            writer.write('predicted,actual\n')
+            tf.logging.info("***** Pred results *****")
+            for prediction, actual in zip(predictions, actuals):
+                predicted = prediction['class_ids'][0]
+                tf.logging.info('item: {}, predicted: {}, actual: {}'.format(prediction, predicted, actual))
+                writer.write('{},{}\n'.format(predicted, actual))
+
+    if FLAGS.do_eval:
+        pred_examples = processor.get_dev_examples(FLAGS.data_dir)
+        eval_features = convert_examples_to_features(
+            pred_examples, label_list, FLAGS.max_seq_length, tokenizer)
+
+        tf.logging.info("***** Running evaluation *****")
+        tf.logging.info("  Num examples = %d", len(pred_examples))
+        tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
+
+        # This tells the estimator to run through the entire set.
+        eval_steps = None
+        # However, if running eval on the TPU, you will need to specify the
+        # number of steps.
+        if FLAGS.use_tpu:
+            # Eval will be slightly WRONG on the TPU because it will truncate
+            # the last batch.
+            eval_steps = int(len(pred_examples) / FLAGS.eval_batch_size)
 
         eval_drop_remainder = True if FLAGS.use_tpu else False
         eval_input_fn = input_fn_builder(
@@ -721,7 +773,6 @@ def main(_):
 
 
 if __name__ == "__main__":
-
     '''
     python run_classifier.py \
     --task_name=qnli \
