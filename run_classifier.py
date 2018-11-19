@@ -20,6 +20,7 @@ from __future__ import print_function
 
 import csv
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import modeling
 import optimization
 import tokenization
@@ -606,7 +607,7 @@ def input_fn_builder(features, seq_length, is_training, drop_remainder):
 
 
 def main(_):
-    tf.logging.set_verbosity(tf.logging.INFO)
+    tf.logging.set_verbosity(tf.logging.ERROR)
 
     processors = {
         "cola": ColaProcessor,
