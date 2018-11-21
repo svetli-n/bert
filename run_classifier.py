@@ -190,7 +190,7 @@ class QnliProcessor(DataProcessor):
 
     def get_labels(self):
         """See base class."""
-        return ["entailment", "not_entailment"]
+        return ["not_entailment", "entailment"]
 
     def _create_examples(self, lines, set_type):
         """Creates examples for the training and dev sets."""
@@ -728,6 +728,7 @@ def main(_):
 
         predictions = estimator.predict(input_fn=pred_input_fn)
         actuals = [a.label_id for a in pred_features]
+        # import pdb; pdb.set_trace()
 
         pred_file = os.path.join(FLAGS.output_dir, "pred_results.csv")
         with tf.gfile.GFile(pred_file, "w") as writer:
@@ -785,7 +786,7 @@ if __name__ == "__main__":
     --init_checkpoint=$BERT_BASE_DIR/bert_model.ckpt \
     --max_seq_length=128 \
     --train_batch_size=32 \
-    --learning_rate=2e-5 \
+    --learning_rate=2e
     --num_train_epochs=3.0 \
     --output_dir=/tmp/mrpc_output/
 
