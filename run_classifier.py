@@ -21,18 +21,18 @@ from __future__ import print_function
 import collections
 import csv
 import os
+import random
 import tempfile
+
+import grpc
+from tensorflow.core.framework import tensor_shape_pb2, tensor_pb2, types_pb2
+from tensorflow_serving.apis import prediction_service_pb2_grpc, predict_pb2
 
 import modeling
 import optimization
 import tokenization
 
-import apache_beam as beam
 import tensorflow as tf
-import tensorflow_transform as tft
-import tensorflow_transform.beam as tft_beam
-from tensorflow_transform.tf_metadata import dataset_metadata
-from tensorflow_transform.tf_metadata import dataset_schema
 
 flags = tf.flags
 
@@ -79,9 +79,9 @@ flags.DEFINE_bool("do_train", False, "Whether to run training.")
 
 flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
 
-flags.DEFINE_bool(
-    "do_predict", False,
-    "Whether to run the model in inference mode on the test set.")
+flags.DEFINE_bool("do_predict", False, "Whether to run the model in inference mode on the test set.")
+
+flags.DEFINE_bool("export_serving_model", False, "Whether export the model for tf serving.")
 
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
@@ -143,12 +143,6 @@ RAW_DATA_FEATURE_SPEC = {
     LABEL: tf.FixedLenFeature([], tf.string),
 }
 
-RAW_DATA_METADATA = dataset_metadata.DatasetMetadata(
-    dataset_schema.from_feature_spec(
-        RAW_DATA_FEATURE_SPEC
-    )
-)
-
 INPUT_IDS = 'input_ids'
 INPUT_MASK = 'input_mask'
 SEGMENT_IDS = 'segment_ids'
@@ -160,37 +154,6 @@ FEATURE_DATA_FEATURE_SPEC = {
     SEGMENT_IDS: tf.VarLenFeature(tf.int64),
     LABEL_IDS: tf.FixedLenFeature([], tf.int64),
 }
-
-FEATURE_DATA_METADATA = dataset_metadata.DatasetMetadata(
-    dataset_schema.from_feature_spec(
-        FEATURE_DATA_FEATURE_SPEC
-    )
-)
-
-TRANSFORMED_TRAIN_DATA_FILEBASE = 'train_transformed'
-TRANSFORMED_TEST_DATA_FILEBASE = 'test_transformed'
-
-
-class MapAndFilterErrors(beam.PTransform):
-    class _MapAndFilterErrorsFn(beam.DoFn):
-
-        def __init__(self, fn):
-            self._fn = fn
-            self._bad_elements_counter = beam.metrics.Metrics.counter(
-                'run_classifier', 'bad_elements'
-            )
-
-        def process(self, element, *args, **kwargs):
-            try:
-                yield self._fn(element)
-            except Exception:
-                self._bad_elements_counter.inc(1)
-
-    def __init__(self, fn):
-        self._fn = fn
-
-    def expand(self, pcoll):
-        return pcoll | beam.ParDo(self._MapAndFilterErrorsFn(self._fn))
 
 
 class InputExample(object):
@@ -771,200 +734,6 @@ def input_fn_builder(features, seq_length, is_training, drop_remainder):
 #     return features
 
 
-def transform(train_file, test_file, working_dir, label_list, max_seq_length, tokenizer):
-    '''
-        Reads and shuffles text data, then writes out as TFRecord of Example protos.
-        :arg train_file pointer to train data folder
-        :arg test_file pointer to test data folder
-    '''
-
-    def preprocessing_fn(inputs):
-        return inputs
-
-    def csv_line_raw_to_feature(line):
-        raw = line.split('\t')
-        guid = raw[0]
-        text_a = raw[1]
-        text_b = raw[2]
-        label = raw[3]
-
-        # print(line)
-        # print('<<<<------->>>>>')
-
-        example = InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label)
-        f = convert_single_example_to_csv_line(example=example, label_list=label_list,
-                                               max_seq_length=max_seq_length, tokenizer=tokenizer)
-        feature = '%s\t%s\t%s\t%s' % (f.input_ids, f.input_mask, f.segment_ids, f.label_id)
-
-        # print(feature)
-
-        return feature
-
-    def print_debug(inputs):
-        print(inputs)
-        return inputs
-
-    with beam.Pipeline() as pipeline:
-        with tft_beam.Context(temp_dir=tempfile.mkdtemp()):
-            ordered_columns = [GUID, TEXT_A, TEXT_B, LABEL]
-            ordered_feature_columns = [INPUT_IDS, INPUT_MASK, SEGMENT_IDS, LABEL_IDS]
-            # csv_coder = tft.coders.CsvCoder(ordered_columns, RAW_DATA_METADATA.schema, delimiter='\t')
-            csv_coder_features = tft.coders.CsvCoder(
-                ordered_feature_columns,
-                FEATURE_DATA_METADATA.schema,
-                delimiter='\t',
-                multivalent_columns=[INPUT_IDS, INPUT_MASK, SEGMENT_IDS],
-                secondary_delimiter=',',
-            )
-
-            feature_data = (
-                    pipeline
-                    | 'ReadTrainData' >> beam.io.ReadFromText(train_file, skip_header_lines=1)
-                    | 'ProcessTrain' >> beam.Map(csv_line_raw_to_feature)
-                    # | 'PrintDebug' >> beam.Map(print_debug)
-                    # | 'DecodeTrain' >> MapAndFilterErrors(csv_coder_features.decode)
-                    | 'DecodeTrain' >> MapAndFilterErrors(csv_coder_features.decode)
-            )
-
-            feature_dataset = (feature_data, FEATURE_DATA_METADATA)
-            # import pdb; pdb.set_trace()
-
-            transform_dataset, transform_fn = (
-                    feature_dataset
-                    | tft_beam.AnalyzeAndTransformDataset(preprocessing_fn)
-            )
-
-            transformed_data, transformed_metadata = transform_dataset
-            import pdb; pdb.set_trace()
-
-            example_coder = tft.coders.ExampleProtoCoder(transformed_metadata.schema)
-            out_train_file = os.path.join(working_dir, TRANSFORMED_TRAIN_DATA_FILEBASE)
-
-            _ = (
-                    transformed_data
-                    | 'EncodeTrainData' >> beam.Map(example_coder.encode)
-                    | 'WriteTrainData' >> beam.io.WriteToTFRecord(out_train_file)
-            )
-
-            feature_test_data = (
-                pipeline
-                | 'ReadTestData' >> beam.io.ReadFromText(test_file, skip_header_lines=1)
-                | 'ProcessTest' >> beam.Map(csv_line_raw_to_feature)
-                # | 'DecodeTest' >> MapAndFilterErrors(csv_coder.decode)
-                | 'DecodeTest' >> MapAndFilterErrors(csv_coder_features.decode)
-            )
-
-            feature_test_dataset = (feature_test_data, FEATURE_DATA_METADATA)
-            out_test_file = os.path.join(working_dir, TRANSFORMED_TEST_DATA_FILEBASE)
-
-            transformed_test_dataset = (
-                (feature_test_dataset, transform_fn)
-                | tft_beam.TransformDataset()
-            )
-
-            transformed_test_data, _ = transformed_test_dataset
-
-            _ = (
-                transformed_test_data
-                | 'EncodeTestData' >> beam.Map(example_coder.encode)
-                | 'WriteTestData' >> beam.io.WriteToTFRecord(out_test_file)
-            )
-
-            _ = (
-                    transform_fn
-                    | 'WriteTransformFn' >> tft_beam.WriteTransformFn(working_dir)
-            )
-
-
-def _make_serving_input_fn(tf_transform_output):
-    """Creates an input function reading from raw data.
-
-  Args:
-    tf_transform_output: Wrapper around output of tf.Transform.
-
-  Returns:
-    The serving input function.
-  """
-    raw_feature_spec = FEATURE_DATA_METADATA.schema.as_feature_spec()
-    # Remove label since it is not available during serving.
-    raw_feature_spec.pop(LABEL_IDS)
-
-    def serving_input_fn():
-        # with tf.variable_scope('serving-input-fn-var-scope'):
-        """Input function for serving."""
-        # Get raw features by generating the basic serving input_fn and calling it.
-        # Here we generate an input_fn that expects a parsed Example proto to be fed
-        # to the model at serving time.  See also
-        # tf.estimator.export.build_raw_serving_input_receiver_fn.
-        raw_input_fn = tf.estimator.export.build_parsing_serving_input_receiver_fn(
-            raw_feature_spec, default_batch_size=None)
-        serving_input_receiver = raw_input_fn()
-
-        # Apply the transform function that was used to generate the materialized
-        # data.
-        raw_features = serving_input_receiver.features
-        transformed_features = tf_transform_output.transform_raw_features(
-            raw_features)
-        sparse_to_dense(transformed_features)
-
-        return tf.estimator.export.ServingInputReceiver(
-            transformed_features, serving_input_receiver.receiver_tensors)
-
-    return serving_input_fn
-
-
-def _make_training_input_fn(tf_transform_output, transformed_examples,
-                            batch_size):
-    """Creates an input function reading from transformed data.
-
-  Args:
-    tf_transform_output: Wrapper around output of tf.Transform.
-    transformed_examples: Base filename of examples.
-    batch_size: Batch size.
-
-  Returns:
-    The input function for training or eval.
-  """
-
-
-    # def input_fn(params):
-    #     """The actual input function."""
-    #     batch_size = params["batch_size"]
-    #
-    #     # For training, we want a lot of parallel reading and shuffling.
-    #     # For eval, we want no shuffling and parallel reading doesn't matter.
-    #     d = tf.data.TFRecordDataset(input_file)
-    #     if is_training:
-    #         d = d.repeat()
-    #         d = d.shuffle(buffer_size=100)
-    #
-    #     d = d.apply(
-    #         tf.contrib.data.map_and_batch(
-    #             lambda record: _decode_record(record, name_to_features),
-    #             batch_size=batch_size,
-    #             drop_remainder=drop_remainder))
-
-
-    def input_fn(params):
-        """Input function for training and eval."""
-        dataset = tf.contrib.data.make_batched_features_dataset(
-            file_pattern=transformed_examples,
-            batch_size=batch_size,
-            features=tf_transform_output.transformed_feature_spec(),
-            reader=tf.data.TFRecordDataset,
-            shuffle=True)
-
-        transformed_features = dataset.make_one_shot_iterator().get_next()
-        sparse_to_dense(transformed_features)
-
-        # Extract features and label from the transformed tensors.
-        # transformed_labels = transformed_features.pop(LABEL_IDS)
-        # return transformed_features, transformed_labels
-        return transformed_features
-
-    return input_fn
-
-
 def sparse_to_dense(tensors_dict):
     for name, tensor in tensors_dict.items():
         try:
@@ -980,7 +749,7 @@ def main(_):
         "qnli": QnliProcessor,
     }
 
-    if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_predict:
+    if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_predict and not FLAGS.export_serving_model:
         raise ValueError(
             "At least one of `do_train`, `do_eval` or `do_predict' must be True.")
 
@@ -1005,10 +774,6 @@ def main(_):
 
     tokenizer = tokenization.FullTokenizer(
         vocab_file=FLAGS.vocab_file, do_lower_case=FLAGS.do_lower_case)
-
-    transform(processor.train_file, processor.test_file,
-              FLAGS.output_dir, label_list, FLAGS.max_seq_length, tokenizer)
-    tf_transform_output = tft.TFTransformOutput(FLAGS.output_dir)
 
     tpu_cluster_resolver = None
     if FLAGS.use_tpu and FLAGS.tpu_name:
@@ -1056,56 +821,47 @@ def main(_):
         eval_batch_size=FLAGS.eval_batch_size,
         predict_batch_size=FLAGS.predict_batch_size)
 
-
     if FLAGS.do_train:
-        # train_file = os.path.join(FLAGS.output_dir, "train.tf_record")
-        # file_based_convert_examples_to_features(
-        #     train_examples, label_list, FLAGS.max_seq_length, tokenizer, train_file)
-        # tf.logging.info("***** Running training *****")
-        # tf.logging.info("  Num examples = %d", len(train_examples))
-        # tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
-        # tf.logging.info("  Num steps = %d", num_train_steps)
+        train_file = os.path.join(FLAGS.output_dir, "train.tf_record")
+        file_based_convert_examples_to_features(
+            train_examples, label_list, FLAGS.max_seq_length, tokenizer, train_file)
+        tf.logging.info("***** Running training *****")
+        tf.logging.info("  Num examples = %d", len(train_examples))
+        tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
+        tf.logging.info("  Num steps = %d", num_train_steps)
 
-        train_input_fn = _make_training_input_fn(
-            tf_transform_output,
-            os.path.join(FLAGS.output_dir, TRANSFORMED_TRAIN_DATA_FILEBASE + '*'),
-            batch_size=FLAGS.train_batch_size)
-        # train_input_fn = file_based_input_fn_builder(
-        #     input_file=train_file,
-        #     seq_length=FLAGS.max_seq_length,
-        #     is_training=True,
-        #     drop_remainder=True)
+        train_input_fn = file_based_input_fn_builder(
+            input_file=train_file,
+            seq_length=FLAGS.max_seq_length,
+            is_training=True,
+            drop_remainder=True)
         estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
 
     if FLAGS.do_eval:
-        # eval_examples = processor.get_dev_examples(FLAGS.data_dir)
-        # eval_file = os.path.join(FLAGS.output_dir, "eval.tf_record")
-        # file_based_convert_examples_to_features(
-        #     eval_examples, label_list, FLAGS.max_seq_length, tokenizer, eval_file)
-        #
-        # tf.logging.info("***** Running evaluation *****")
-        # tf.logging.info("  Num examples = %d", len(eval_examples))
-        # tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
+        eval_examples = processor.get_dev_examples(FLAGS.data_dir)
+        eval_file = os.path.join(FLAGS.output_dir, "eval.tf_record")
+        file_based_convert_examples_to_features(
+            eval_examples, label_list, FLAGS.max_seq_length, tokenizer, eval_file)
+
+        tf.logging.info("***** Running evaluation *****")
+        tf.logging.info("  Num examples = %d", len(eval_examples))
+        tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
 
         # This tells the estimator to run through the entire set.
         eval_steps = None
         # However, if running eval on the TPU, you will need to specify the
         # number of steps.
-        # if FLAGS.use_tpu:
-        #     # Eval will be slightly WRONG on the TPU because it will truncate
-        #     # the last batch.
-        #     eval_steps = int(len(eval_examples) / FLAGS.eval_batch_size)
+        if FLAGS.use_tpu:
+            # Eval will be slightly WRONG on the TPU because it will truncate
+            # the last batch.
+            eval_steps = int(len(eval_examples) / FLAGS.eval_batch_size)
 
         eval_drop_remainder = True if FLAGS.use_tpu else False
-        # eval_input_fn = file_based_input_fn_builder(
-        #     input_file=eval_file,
-        #     seq_length=FLAGS.max_seq_length,
-        #     is_training=False,
-        #     drop_remainder=eval_drop_remainder)
-        eval_input_fn = _make_training_input_fn(
-            tf_transform_output,
-            os.path.join(FLAGS.output_dir, TRANSFORMED_TEST_DATA_FILEBASE + '*'),
-            batch_size=FLAGS.train_batch_size)
+        eval_input_fn = file_based_input_fn_builder(
+            input_file=eval_file,
+            seq_length=FLAGS.max_seq_length,
+            is_training=False,
+            drop_remainder=eval_drop_remainder)
 
         result = estimator.evaluate(input_fn=eval_input_fn, steps=eval_steps)
 
@@ -1118,32 +874,26 @@ def main(_):
 
     if FLAGS.do_predict:
         predict_examples = processor.get_test_examples(FLAGS.data_dir)
-        # predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
-        # file_based_convert_examples_to_features(predict_examples, label_list,
-        #                                         FLAGS.max_seq_length, tokenizer,
-        #                                         predict_file)
-        #
-        # tf.logging.info("***** Running prediction*****")
-        # tf.logging.info("  Num examples = %d", len(predict_examples))
-        # tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
-        #
-        # if FLAGS.use_tpu:
-        #     # Warning: According to tpu_estimator.py Prediction on TPU is an
-        #     # experimental feature and hence not supported here
-        #     raise ValueError("Prediction in TPU not supported")
-        #
+        predict_file = os.path.join(FLAGS.output_dir, "predict.tf_record")
+        file_based_convert_examples_to_features(predict_examples, label_list,
+                                                FLAGS.max_seq_length, tokenizer,
+                                                predict_file)
 
-        # predict_drop_remainder = True if FLAGS.use_tpu else False
-        # predict_input_fn = file_based_input_fn_builder(
-        #     input_file=predict_file,
-        #     seq_length=FLAGS.max_seq_length,
-        #     is_training=False,
-        #     drop_remainder=predict_drop_remainder)
+        tf.logging.info("***** Running prediction*****")
+        tf.logging.info("  Num examples = %d", len(predict_examples))
+        tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
 
-        predict_input_fn = _make_training_input_fn(
-            tf_transform_output,
-            os.path.join(FLAGS.output_dir, TRANSFORMED_TEST_DATA_FILEBASE + '*'),
-            batch_size=1)
+        if FLAGS.use_tpu:
+            # Warning: According to tpu_estimator.py Prediction on TPU is an
+            # experimental feature and hence not supported here
+            raise ValueError("Prediction in TPU not supported")
+
+        predict_drop_remainder = True if FLAGS.use_tpu else False
+        predict_input_fn = file_based_input_fn_builder(
+            input_file=predict_file,
+            seq_length=FLAGS.max_seq_length,
+            is_training=False,
+            drop_remainder=predict_drop_remainder)
 
         result = estimator.predict(input_fn=predict_input_fn)
 
@@ -1155,18 +905,96 @@ def main(_):
                 # output_line += "\t".join([example.text_a, example.text_b, example.label]) + "\n"
                 writer.write(output_line)
 
-    serving_input_fn = _make_serving_input_fn(tf_transform_output)
-    exported_model_dir = '/tmp/mod-out'
-    estimator._export_to_tpu = False
-    # train with tf_transform_output before saving it since otherwise the serving signature is from the old model
-    # (loaded from the checkpoint)
-    estimator.export_savedmodel(exported_model_dir, serving_input_fn)
+    if FLAGS.export_serving_model:
+        exported_model_dir = '/tmp/mod-out'
+        estimator._export_to_tpu = False
+        estimator.export_savedmodel(exported_model_dir, serving_input_fn)
+
+
+def serving_input_fn():
+    with tf.variable_scope("foo"):
+        feature_spec = {
+            "input_ids": tf.FixedLenFeature([FLAGS.max_seq_length], tf.int64),
+            "input_mask": tf.FixedLenFeature([FLAGS.max_seq_length], tf.int64),
+            "segment_ids": tf.FixedLenFeature([FLAGS.max_seq_length], tf.int64),
+            "label_ids": tf.FixedLenFeature([], tf.int64),
+        }
+        serialized_tf_example = tf.placeholder(dtype=tf.string, shape=[None], name='input_example_tensor')
+        receiver_tensors = {'examples': serialized_tf_example}
+        features = tf.parse_example(serialized_tf_example, feature_spec)
+        return tf.estimator.export.ServingInputReceiver(features, receiver_tensors)
+
+
+def from_record_to_tf_example(ex_index, example, label_list, max_seq_length, tokenizer):
+  feature = convert_single_example(ex_index, example, label_list, max_seq_length, tokenizer)
+
+  def create_int_feature(values):
+    f = tf.train.Feature(int64_list=tf.train.Int64List(value=list(values)))
+    return f
+
+  features = collections.OrderedDict()
+  features["input_ids"] = create_int_feature(feature.input_ids)
+  features["input_mask"] = create_int_feature(feature.input_mask)
+  features["segment_ids"] = create_int_feature(feature.segment_ids)
+  features["label_ids"] = create_int_feature([feature.label_id])
+  tf_example = tf.train.Example(features=tf.train.Features(feature=features))
+
+  return tf_example
+
+
+def make_request():
+    max_seq_length = 128
+    vocab_file = '/Users/svetlin/workspace/q-and-a/bert-data/cased_L-12_H-768_A-12/vocab.txt'
+    data_dir = '.'
+
+    channel = grpc.insecure_channel("localhost:8500")
+    stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
+
+    # Parse Description
+    tokenizer = tokenization.FullTokenizer(vocab_file=vocab_file, do_lower_case=True)
+    processor = QnliProcessor(data_dir)
+    label_list = processor.get_labels()
+    question = 'How are you?'
+    answer = 'bb'
+    label = 'not_entailment'
+    request_id = str(random.randint(1, 9223372036854775807))
+    example = [request_id, question, answer, label]
+
+    inputExample = processor._create_examples([None, example, example], 'test')[0]
+    tf_example = from_record_to_tf_example(3, inputExample, label_list, max_seq_length, tokenizer)
+    model_input = tf_example.SerializeToString()
+
+    # Send request
+    # See prediction_service.proto for gRPC request/response details.
+    model_request = predict_pb2.PredictRequest()
+    model_request.model_spec.name = 'my_model'
+    # model_request.model_spec.signature_name = 'serving_default'
+    dims = [tensor_shape_pb2.TensorShapeProto.Dim(size=1)]
+    tensor_shape_proto = tensor_shape_pb2.TensorShapeProto(dim=dims)
+    tensor_proto = tensor_pb2.TensorProto(
+        dtype=types_pb2.DT_STRING,
+        tensor_shape=tensor_shape_proto,
+        string_val=[model_input])
+
+    model_request.inputs['examples'].CopyFrom(tensor_proto)
+    result = stub.Predict(model_request, 10.0)  # 10 secs timeout
+    result = tf.make_ndarray(result.outputs["output"])
+    pretty_result = "Predicted Label: " + label_list[result[0].argmax(axis=0)]
+    # tf.logging.info("Predicted Label: %s", label_list[result[0].argmax(axis=0)])
+    # tf.logging.info('Result: %s', pretty_result)
+    print(result[0])
+    print(pretty_result)
 
 
 if __name__ == "__main__":
-    flags.mark_flag_as_required("data_dir")
-    flags.mark_flag_as_required("task_name")
-    flags.mark_flag_as_required("vocab_file")
-    flags.mark_flag_as_required("bert_config_file")
-    flags.mark_flag_as_required("output_dir")
+    # flags.mark_flag_as_required("data_dir")
+    # flags.mark_flag_as_required("task_name")
+    # flags.mark_flag_as_required("vocab_file")
+    # flags.mark_flag_as_required("bert_config_file")
+    # flags.mark_flag_as_required("output_dir")
+
     tf.app.run()
+
+    # make_request()
+
+
