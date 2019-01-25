@@ -22,8 +22,7 @@ import collections
 import csv
 import os
 import random
-import tempfile
-
+import tensorflow as tf
 import grpc
 from tensorflow.core.framework import tensor_shape_pb2, tensor_pb2, types_pb2
 from tensorflow_serving.apis import prediction_service_pb2_grpc, predict_pb2
@@ -31,8 +30,6 @@ from tensorflow_serving.apis import prediction_service_pb2_grpc, predict_pb2
 import modeling
 import optimization
 import tokenization
-
-import tensorflow as tf
 
 flags = tf.flags
 
@@ -130,30 +127,6 @@ tf.flags.DEFINE_string("master", None, "[Optional] TensorFlow master URL.")
 flags.DEFINE_integer(
     "num_tpu_cores", 8,
     "Only used if `use_tpu` is True. Total number of TPU cores to use.")
-
-GUID = 'guid'
-TEXT_A = 'text_a'
-TEXT_B = 'text_b'
-LABEL = 'label'
-
-RAW_DATA_FEATURE_SPEC = {
-    GUID: tf.FixedLenFeature([], tf.int64),
-    TEXT_A: tf.FixedLenFeature([], tf.string),
-    TEXT_B: tf.FixedLenFeature([], tf.string),
-    LABEL: tf.FixedLenFeature([], tf.string),
-}
-
-INPUT_IDS = 'input_ids'
-INPUT_MASK = 'input_mask'
-SEGMENT_IDS = 'segment_ids'
-LABEL_IDS = 'label_ids'
-
-FEATURE_DATA_FEATURE_SPEC = {
-    INPUT_IDS: tf.VarLenFeature(tf.int64),
-    INPUT_MASK: tf.VarLenFeature(tf.int64),
-    SEGMENT_IDS: tf.VarLenFeature(tf.int64),
-    LABEL_IDS: tf.FixedLenFeature([], tf.int64),
-}
 
 
 class InputExample(object):
@@ -254,101 +227,6 @@ class QnliProcessor(DataProcessor):
             examples.append(InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
         return examples
 
-
-def convert_single_example_to_csv_line(example, label_list, max_seq_length, tokenizer):
-    """Converts a single `InputExample` into a single `InputFeatures`."""
-    label_map = {}
-    for (i, label) in enumerate(label_list):
-        label_map[label] = i
-
-    tokens_a = tokenizer.tokenize(example.text_a)
-    tokens_b = None
-    if example.text_b:
-        tokens_b = tokenizer.tokenize(example.text_b)
-
-    if tokens_b:
-        # Modifies `tokens_a` and `tokens_b` in place so that the total
-        # length is less than the specified length.
-        # Account for [CLS], [SEP], [SEP] with "- 3"
-        _truncate_seq_pair(tokens_a, tokens_b, max_seq_length - 3)
-    else:
-        # Account for [CLS] and [SEP] with "- 2"
-        if len(tokens_a) > max_seq_length - 2:
-            tokens_a = tokens_a[0:(max_seq_length - 2)]
-
-    # The convention in BERT is:
-    # (a) For sequence pairs:
-    #  tokens:   [CLS] is this jack ##son ##ville ? [SEP] no it is not . [SEP]
-    #  type_ids: 0     0  0    0    0     0       0 0     1  1  1  1   1 1
-    # (b) For single sequences:
-    #  tokens:   [CLS] the dog is hairy . [SEP]
-    #  type_ids: 0     0   0   0  0     0 0
-    #
-    # Where "type_ids" are used to indicate whether this is the first
-    # sequence or the second sequence. The embedding vectors for `type=0` and
-    # `type=1` were learned during pre-training and are added to the wordpiece
-    # embedding vector (and position vector). This is not *strictly* necessary
-    # since the [SEP] token unambiguously separates the sequences, but it makes
-    # it easier for the model to learn the concept of sequences.
-    #
-    # For classification tasks, the first vector (corresponding to [CLS]) is
-    # used as as the "sentence vector". Note that this only makes sense because
-    # the entire model is fine-tuned.
-    tokens = []
-    segment_ids = []
-    tokens.append("[CLS]")
-    segment_ids.append(0)
-    for token in tokens_a:
-        tokens.append(token)
-        segment_ids.append(0)
-    tokens.append("[SEP]")
-    segment_ids.append(0)
-
-    if tokens_b:
-        for token in tokens_b:
-            tokens.append(token)
-            segment_ids.append(1)
-        tokens.append("[SEP]")
-        segment_ids.append(1)
-
-    input_ids = tokenizer.convert_tokens_to_ids(tokens)
-
-    # The mask has 1 for real tokens and 0 for padding tokens. Only real
-    # tokens are attended to.
-    input_mask = [1] * len(input_ids)
-
-    # Zero-pad up to the sequence length.
-    while len(input_ids) < max_seq_length:
-        input_ids.append(0)
-        input_mask.append(0)
-        segment_ids.append(0)
-
-    assert len(input_ids) == max_seq_length
-    assert len(input_mask) == max_seq_length
-    assert len(segment_ids) == max_seq_length
-
-    label_id = label_map[example.label]
-
-    # if ex_index < 5:
-    #     tf.logging.info("*** Example ***")
-    #     tf.logging.info("guid: %s" % (example.guid))
-    #     tf.logging.info("tokens: %s" % " ".join(
-    #         [tokenization.printable_text(x) for x in tokens]))
-    #     tf.logging.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
-    #     tf.logging.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
-    #     tf.logging.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-    #     tf.logging.info("label: %s (id = %d)" % (example.label, label_id))
-
-    input_ids_str = ','.join([str(x) for x in input_ids])
-    input_mask_str = ','.join([str(x) for x in input_mask])
-    segment_ids_str = ','.join([str(x) for x in segment_ids])
-
-    feature = InputFeatures(
-        input_ids=input_ids_str,
-        input_mask=input_mask_str,
-        segment_ids=segment_ids_str,
-        label_id=label_id)
-    return feature
 
 
 def convert_single_example(ex_index, example, label_list, max_seq_length,
@@ -946,6 +824,7 @@ def make_request():
     max_seq_length = 128
     vocab_file = '/Users/svetlin/workspace/q-and-a/bert-data/cased_L-12_H-768_A-12/vocab.txt'
     data_dir = '.'
+    examples_file = '/Users/svetlin/workspace/q-and-a/glue_data/QNLI/dev.tsv.short'
 
     channel = grpc.insecure_channel("localhost:8500")
     stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
@@ -954,36 +833,37 @@ def make_request():
     tokenizer = tokenization.FullTokenizer(vocab_file=vocab_file, do_lower_case=True)
     processor = QnliProcessor(data_dir)
     label_list = processor.get_labels()
-    question = 'How are you?'
-    answer = 'bb'
-    label = 'not_entailment'
-    request_id = str(random.randint(1, 9223372036854775807))
-    example = [request_id, question, answer, label]
 
-    inputExample = processor._create_examples([None, example, example], 'test')[0]
-    tf_example = from_record_to_tf_example(3, inputExample, label_list, max_seq_length, tokenizer)
-    model_input = tf_example.SerializeToString()
+    with open(examples_file) as fr:
+       lines = fr.readlines()
 
-    # Send request
-    # See prediction_service.proto for gRPC request/response details.
-    model_request = predict_pb2.PredictRequest()
-    model_request.model_spec.name = 'my_model'
-    # model_request.model_spec.signature_name = 'serving_default'
-    dims = [tensor_shape_pb2.TensorShapeProto.Dim(size=1)]
-    tensor_shape_proto = tensor_shape_pb2.TensorShapeProto(dim=dims)
-    tensor_proto = tensor_pb2.TensorProto(
-        dtype=types_pb2.DT_STRING,
-        tensor_shape=tensor_shape_proto,
-        string_val=[model_input])
+    for line in lines[1:]:
+        example = line[:-1].split('\t')
 
-    model_request.inputs['examples'].CopyFrom(tensor_proto)
-    result = stub.Predict(model_request, 10.0)  # 10 secs timeout
-    result = tf.make_ndarray(result.outputs["output"])
-    pretty_result = "Predicted Label: " + label_list[result[0].argmax(axis=0)]
-    # tf.logging.info("Predicted Label: %s", label_list[result[0].argmax(axis=0)])
-    # tf.logging.info('Result: %s', pretty_result)
-    print(result[0])
-    print(pretty_result)
+        inputExample = processor._create_examples([None, example], 'test')[0]
+        tf_example = from_record_to_tf_example(3, inputExample, label_list, max_seq_length, tokenizer)
+        model_input = tf_example.SerializeToString()
+
+        # Send request
+        # See prediction_service.proto for gRPC request/response details.
+        model_request = predict_pb2.PredictRequest()
+        model_request.model_spec.name = 'my_model'
+        # model_request.model_spec.signature_name = 'serving_default'
+        dims = [tensor_shape_pb2.TensorShapeProto.Dim(size=1)]
+        tensor_shape_proto = tensor_shape_pb2.TensorShapeProto(dim=dims)
+        tensor_proto = tensor_pb2.TensorProto(
+            dtype=types_pb2.DT_STRING,
+            tensor_shape=tensor_shape_proto,
+            string_val=[model_input])
+
+        model_request.inputs['examples'].CopyFrom(tensor_proto)
+        result = stub.Predict(model_request, 10.0)  # 10 secs timeout
+        result = tf.make_ndarray(result.outputs["output"])
+        # pretty_result = "Predicted Label: " + label_list[result[0].argmax(axis=0)]
+        # tf.logging.info("Predicted Label: %s", label_list[result[0].argmax(axis=0)])
+        # tf.logging.info('Result: %s', pretty_result)
+        print(result[0])
+        # print(pretty_result)
 
 
 if __name__ == "__main__":
@@ -993,8 +873,8 @@ if __name__ == "__main__":
     # flags.mark_flag_as_required("bert_config_file")
     # flags.mark_flag_as_required("output_dir")
 
-    tf.app.run()
+    # tf.app.run()
 
-    # make_request()
+    make_request()
 
 
