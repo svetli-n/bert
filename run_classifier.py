@@ -610,14 +610,6 @@ def input_fn_builder(features, seq_length, is_training, drop_remainder):
 #     return features
 
 
-def sparse_to_dense(tensors_dict):
-    for name, tensor in tensors_dict.items():
-        try:
-            tensors_dict[name] = tf.sparse.to_dense(tensor)
-        except TypeError:
-            pass
-
-
 def main(_):
     tf.logging.set_verbosity(tf.logging.INFO)
 
@@ -819,6 +811,27 @@ def from_record_to_tf_example(ex_index, example, label_list, max_seq_length, tok
 
 
 if __name__ == "__main__":
+    '''
+    Example call:
+    
+    GLUE_DIR=/Users/svetlin/workspace/q-and-a/glue_data BERT_BASE_DIR=/Users/svetlin/workspace/q-and-a/bert-data/cased_L-12_H-768_A-12
+    python run_classifier.py \
+      --task_name=qnli \
+      --do_train=false \
+      --do_eval=false \
+      --do_predict=false \
+      --export_serving_model=true \
+      --data_dir=$GLUE_DIR/QNLI \
+      --vocab_file=$BERT_BASE_DIR/vocab.txt \
+      --bert_config_file=$BERT_BASE_DIR/bert_config.json \
+      --init_checkpoint=/Users/svetlin/workspace/q-and-a/bert-data/checkpoint/model.ckpt-10165 \
+      --max_seq_length=128 \
+      --train_batch_size=32 \
+      --learning_rate=2e-5 \
+      --num_train_epochs=3.0 \
+      --output_dir=/Users/svetlin/workspace/q-and-a/bert-data/checkpoint
+
+    '''
     flags.mark_flag_as_required("data_dir")
     flags.mark_flag_as_required("task_name")
     flags.mark_flag_as_required("vocab_file")
