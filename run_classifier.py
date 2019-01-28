@@ -21,11 +21,7 @@ from __future__ import print_function
 import collections
 import csv
 import os
-import random
 import tensorflow as tf
-import grpc
-from tensorflow.core.framework import tensor_shape_pb2, tensor_pb2, types_pb2
-from tensorflow_serving.apis import prediction_service_pb2_grpc, predict_pb2
 
 import modeling
 import optimization
@@ -194,9 +190,12 @@ class QnliProcessor(DataProcessor):
     """Processor for the QNLI data set (GLUE version)."""
 
     def __init__(self, data_dir):
-        self.train_file = os.path.join(data_dir, "train.tsv.short")
-        self.dev_file = os.path.join(data_dir, "dev.tsv.short")
-        self.test_file = os.path.join(data_dir, "dev.tsv.short")
+        # self.train_file = os.path.join(data_dir, "train.tsv.short")
+        # self.dev_file = os.path.join(data_dir, "dev.tsv.short")
+        # self.test_file = os.path.join(data_dir, "dev.tsv.short")
+        self.train_file = os.path.join(data_dir, "train.tsv")
+        self.dev_file = os.path.join(data_dir, "train.tsv")
+        self.test_file = os.path.join(data_dir, "dev.tsv")
 
     def get_test_examples(self, data_dir=None):
         """See base class."""
@@ -226,7 +225,6 @@ class QnliProcessor(DataProcessor):
             label = tokenization.convert_to_unicode(line[-1])
             examples.append(InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
         return examples
-
 
 
 def convert_single_example(ex_index, example, label_list, max_seq_length,
@@ -804,89 +802,27 @@ def serving_input_fn():
 
 
 def from_record_to_tf_example(ex_index, example, label_list, max_seq_length, tokenizer):
-  feature = convert_single_example(ex_index, example, label_list, max_seq_length, tokenizer)
+    feature = convert_single_example(ex_index, example, label_list, max_seq_length, tokenizer)
 
-  def create_int_feature(values):
-    f = tf.train.Feature(int64_list=tf.train.Int64List(value=list(values)))
-    return f
+    def create_int_feature(values):
+        f = tf.train.Feature(int64_list=tf.train.Int64List(value=list(values)))
+        return f
 
-  features = collections.OrderedDict()
-  features["input_ids"] = create_int_feature(feature.input_ids)
-  features["input_mask"] = create_int_feature(feature.input_mask)
-  features["segment_ids"] = create_int_feature(feature.segment_ids)
-  features["label_ids"] = create_int_feature([feature.label_id])
-  tf_example = tf.train.Example(features=tf.train.Features(feature=features))
+    features = collections.OrderedDict()
+    features["input_ids"] = create_int_feature(feature.input_ids)
+    features["input_mask"] = create_int_feature(feature.input_mask)
+    features["segment_ids"] = create_int_feature(feature.segment_ids)
+    features["label_ids"] = create_int_feature([feature.label_id])
+    tf_example = tf.train.Example(features=tf.train.Features(feature=features))
 
-  return tf_example
-
-
-def make_request():
-    max_seq_length = 128
-    vocab_file = '/Users/svetlin/workspace/q-and-a/bert-data/cased_L-12_H-768_A-12/vocab.txt'
-    data_dir = '.'
-    dev_file = '/Users/svetlin/workspace/q-and-a/glue_data/QNLI/dev.tsv.short'
-    train_file = '/Users/svetlin/workspace/q-and-a/glue_data/QNLI/train.tsv.short'
-
-    channel = grpc.insecure_channel("localhost:8500")
-    stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
-
-    # Parse Description
-    tokenizer = tokenization.FullTokenizer(vocab_file=vocab_file, do_lower_case=True)
-    processor = QnliProcessor(data_dir)
-    label_list = processor.get_labels()
-
-    with open(dev_file) as dev_fh:
-       dev_lines = dev_fh.readlines()
-
-    with open(train_file) as train_fh:
-        train_lines = train_fh.readlines()
-
-    for dev_line, train_line in zip(dev_lines[1:], train_lines[1:]):
-        train_example = train_line[:-1].split('\t')
-        dev_example = dev_line[:-1].split('\t')
-
-        input_li = [dev_example for _ in range(20)]
-        inputExample = processor._create_examples(input_li, 'test')
-        model_input = []
-
-        for example in inputExample:
-            tf_example = from_record_to_tf_example(3, example, label_list, max_seq_length, tokenizer)
-            model_input.append(tf_example.SerializeToString())
-
-        # Send request
-        # See prediction_service.proto for gRPC request/response details.
-        model_request = predict_pb2.PredictRequest()
-        model_request.model_spec.name = 'my_model'
-        model_request.model_spec.signature_name = 'serving_default'
-
-        # dims = [tensor_shape_pb2.TensorShapeProto.Dim(size=2)]
-        # tensor_shape_proto = tensor_shape_pb2.TensorShapeProto(dim=dims)
-        # tensor_proto = tensor_pb2.TensorProto(
-        #     dtype=types_pb2.DT_STRING,
-        #     tensor_shape=tensor_shape_proto,
-        #     string_val=[model_input])
-
-        tensor_proto = tf.contrib.util.make_tensor_proto(model_input, shape=[len(inputExample)])
-
-        model_request.inputs['examples'].CopyFrom(tensor_proto)
-        result = stub.Predict(model_request, 10.0)  # 10 secs timeout
-        result = tf.make_ndarray(result.outputs["output"])
-        # pretty_result = "Predicted Label: " + label_list[result[0].argmax(axis=0)]
-        # tf.logging.info("Predicted Label: %s", label_list[result[0].argmax(axis=0)])
-        # tf.logging.info('Result: %s', pretty_result)
-        print(result)
-        # print(pretty_result)
+    return tf_example
 
 
 if __name__ == "__main__":
-    # flags.mark_flag_as_required("data_dir")
-    # flags.mark_flag_as_required("task_name")
-    # flags.mark_flag_as_required("vocab_file")
-    # flags.mark_flag_as_required("bert_config_file")
-    # flags.mark_flag_as_required("output_dir")
+    flags.mark_flag_as_required("data_dir")
+    flags.mark_flag_as_required("task_name")
+    flags.mark_flag_as_required("vocab_file")
+    flags.mark_flag_as_required("bert_config_file")
+    flags.mark_flag_as_required("output_dir")
 
-    # tf.app.run()
-
-    make_request()
-
-
+    tf.app.run()
