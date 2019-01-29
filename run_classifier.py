@@ -611,7 +611,7 @@ def input_fn_builder(features, seq_length, is_training, drop_remainder):
 
 
 def main(_):
-    tf.logging.set_verbosity(tf.logging.INFO)
+    tf.logging.set_verbosity(tf.logging.ERROR)
 
     processors = {
         "qnli": QnliProcessor,
