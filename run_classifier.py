@@ -76,6 +76,8 @@ flags.DEFINE_bool("do_predict", False, "Whether to run the model in inference mo
 
 flags.DEFINE_bool("export_serving_model", False, "Whether export the model for tf serving.")
 
+flags.DEFINE_string("serving_export_dir", ".", "Where to export the model for tf serving")
+
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
 flags.DEFINE_integer("eval_batch_size", 8, "Total batch size for eval.")
@@ -195,11 +197,11 @@ class QnliProcessor(DataProcessor):
         # self.test_file = os.path.join(data_dir, "dev.tsv.short")
         self.train_file = os.path.join(data_dir, "train.tsv")
         self.dev_file = os.path.join(data_dir, "train.tsv")
-        self.test_file = os.path.join(data_dir, "dev.tsv")
+        self.test_file = os.path.join(data_dir, "dev.tsv.short")
 
     def get_test_examples(self, data_dir=None):
         """See base class."""
-        return self._create_examples(self._read_tsv(self.dev_file), "test")
+        return self._create_examples(self._read_tsv(self.test_file), "test")
 
     def get_train_examples(self, data_dir=None):
         """See base class."""
@@ -753,7 +755,7 @@ def main(_):
 
         if FLAGS.use_tpu:
             # Warning: According to tpu_estimator.py Prediction on TPU is an
-            # experimental feature and hence not supported here
+
             raise ValueError("Prediction in TPU not supported")
 
         predict_drop_remainder = True if FLAGS.use_tpu else False
@@ -769,14 +771,13 @@ def main(_):
         with tf.gfile.GFile(output_predict_file, "w") as writer:
             tf.logging.info("***** Predict results *****")
             for prediction, example in zip(result, predict_examples):
-                output_line = "\t".join(str(class_probability) for class_probability in prediction) + "\n"
-                # output_line += "\t".join([example.text_a, example.text_b, example.label]) + "\n"
+                output_line = "\t".join(str(class_probability) for class_probability in prediction) + "\t"
+                output_line += "\t".join([example.text_a, example.text_b, example.label]) + "\n"
                 writer.write(output_line)
 
     if FLAGS.export_serving_model:
-        exported_model_dir = '/tmp/mod-out'
         estimator._export_to_tpu = False
-        estimator.export_savedmodel(exported_model_dir, serving_input_fn)
+        estimator.export_savedmodel(FLAGS.serving_export_dir, serving_input_fn)
 
 
 def serving_input_fn():
